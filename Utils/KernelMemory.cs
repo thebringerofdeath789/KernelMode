@@ -3,7 +3,7 @@
 
 using KernelMode.Providers;
 using System;
-using KernelMode.EDR;
+//using KernelMode.EDR;
 
 namespace KernelMode.Utils
 {

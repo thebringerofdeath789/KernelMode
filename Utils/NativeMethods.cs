@@ -9,16 +9,17 @@ namespace KernelMode.Utils
 {
 	public static class NativeMethods
 	{
+		// File access constants
 		public const uint GENERIC_READ = 0x80000000;
 		public const uint GENERIC_WRITE = 0x40000000;
 		public const uint OPEN_EXISTING = 3;
+		public const uint FILE_SHARE_READ = 0x00000001;
+		public const uint FILE_SHARE_WRITE = 0x00000002;
 
-		public const uint FILE_DEVICE_UNKNOWN = 0x00000022;
-		public const uint METHOD_BUFFERED = 0x00000000;
-		public const uint FILE_ANY_ACCESS = 0x00000000;
-		public const uint FILE_SPECIAL_ACCESS = FILE_ANY_ACCESS;
-
-		[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+		// System information class constants
+		public const int SystemModuleInformation = 11;
+		
+		[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
 		public static extern SafeFileHandle CreateFile(
 			string lpFileName,
 			uint dwDesiredAccess,
@@ -39,37 +40,14 @@ namespace KernelMode.Utils
 			out int lpBytesReturned,
 			IntPtr lpOverlapped);
 
-		[DllImport("kernel32.dll", SetLastError = true)]
-		public static extern bool DeviceIoControl(
-			SafeFileHandle hDevice,
-			uint dwIoControlCode,
-			[In] byte[] lpInBuffer,
-			int nInBufferSize,
-			[Out] byte[] lpOutBuffer,
-			int nOutBufferSize,
-			ref int lpBytesReturned,
-			IntPtr lpOverlapped);
-
+		[DllImport("ntdll.dll")]
+		public static extern int NtQuerySystemInformation(
+			int infoClass,
+			IntPtr buffer,
+			int length,
+			out int returnLength);
+			
 		[DllImport("kernel32.dll", SetLastError = true)]
 		public static extern bool CloseHandle(IntPtr hObject);
-
-		[DllImport("kernel32.dll")]
-		public static extern IntPtr GetCurrentProcess();
-
-		[DllImport("kernel32.dll", SetLastError = true)]
-		public static extern bool ReadProcessMemory(
-			IntPtr hProcess,
-			IntPtr lpBaseAddress,
-			[Out] byte[] lpBuffer,
-			int dwSize,
-			out int lpNumberOfBytesRead);
-
-		[DllImport("kernel32.dll", SetLastError = true)]
-		public static extern bool WriteProcessMemory(
-			IntPtr hProcess,
-			IntPtr lpBaseAddress,
-			[In] byte[] lpBuffer,
-			int dwSize,
-			out int lpNumberOfBytesWritten);
 	}
 }

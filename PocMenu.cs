@@ -33,7 +33,8 @@ namespace KernelMode
 				Console.WriteLine("[6] Remove persistence");
 				Console.WriteLine("[7] Interactive SYSTEM Shell");
 				Console.WriteLine("[8] Load unsigned driver (.sys) via DSE Patch");
-				Console.WriteLine("[9] Exit");
+				Console.WriteLine("[9] Test PE Parsing (dry-run)");
+				Console.WriteLine("[0] Exit");
 				Console.Write("Select an option: ");
 
 				switch (Console.ReadLine())
@@ -51,7 +52,7 @@ namespace KernelMode
 							Console.WriteLine("[-] Provider not initialized.");
 						break;
 					case "4":
-						//AVCallbackUnlinker.UnlinkAVCallbacks();
+						AvCallbackUnlinker.UnlinkAVCallbacks();
 						break;
 					case "5":
 						//Persistence.Add();
@@ -66,6 +67,9 @@ namespace KernelMode
 						DriverLoader.LoadUnsignedDriver();
 						break;
 					case "9":
+						DriverLoader.TestPEParsingDryRun();
+						break;
+					case "0":
 						return;
 					default:
 						Console.WriteLine("Invalid selection.");
@@ -111,6 +115,5 @@ namespace KernelMode
 			Console.WriteLine("[+] Provider initialized.");
 			return provider;
 		}
-
 	}
 }
