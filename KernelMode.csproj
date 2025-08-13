@@ -79,6 +79,7 @@
     <Compile Include="Native\Win32Interop.cs" />
     <Compile Include="PocMenu.cs" />
     <Compile Include="Privilege\PrivilegeViewer.cs" />
+    <Compile Include="Privilege\SystemShell.cs" />
     <Compile Include="Privilege\TokenManipulator.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
@@ -97,6 +98,7 @@
     <Compile Include="Utils\AvCallbackUnlinker.cs" />
     <Compile Include="Utils\DriverInstaller.cs" />
     <Compile Include="Utils\DriverLoader.cs" />
+    <Compile Include="Utils\DsePatcher.cs" />
     <Compile Include="Utils\EprocessScanner.cs" />
     <Compile Include="Utils\KernelExportResolver.cs" />
     <Compile Include="Utils\KernelMemory.cs" />

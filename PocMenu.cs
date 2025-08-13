@@ -31,7 +31,9 @@ namespace KernelMode
 				Console.WriteLine("[4] Force-unload AV/EDR driver");
 				Console.WriteLine("[5] Add persistence");
 				Console.WriteLine("[6] Remove persistence");
-				Console.WriteLine("[7] Exit");
+				Console.WriteLine("[7] Interactive SYSTEM Shell");
+				Console.WriteLine("[8] Load unsigned driver (.sys) via DSE Patch");
+				Console.WriteLine("[9] Exit");
 				Console.Write("Select an option: ");
 
 				switch (Console.ReadLine())
@@ -58,6 +60,12 @@ namespace KernelMode
 						Persistence.Remove();
 						break;
 					case "7":
+						SystemShell.Start();
+						break;
+					case "8":
+						DriverLoader.LoadUnsignedDriver();
+						break;
+					case "9":
 						return;
 					default:
 						Console.WriteLine("Invalid selection.");
