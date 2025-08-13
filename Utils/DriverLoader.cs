@@ -433,6 +433,7 @@ namespace KernelMode.Driver
 			var result = new MappedImageInfo();
 			const ushort IMAGE_DOS_SIGNATURE = 0x5A4D;
 			const uint IMAGE_NT_SIGNATURE = 0x00004550;
+            const ushort PE32_PLUS_MAGIC = 0x20b;
 
 			ushort dosSig = BitConverter.ToUInt16(image, 0);
 			if (dosSig != IMAGE_DOS_SIGNATURE)
@@ -450,6 +451,14 @@ namespace KernelMode.Driver
 			}
 
 			int optionalHeaderOffset = peHeaderOffset + 24;
+            // Explicitly check for 64-bit PE file (PE32+).
+            short optionalMagic = BitConverter.ToInt16(image, optionalHeaderOffset);
+            if (optionalMagic != PE32_PLUS_MAGIC)
+            {
+                Console.WriteLine("[-] Invalid or unsupported PE format. This tool only supports 64-bit drivers.");
+                return result;
+            }
+
 			short numberOfSections = BitConverter.ToInt16(image, peHeaderOffset + 6);
 			int sizeOfOptionalHeader = BitConverter.ToInt16(image, peHeaderOffset + 20);
 			int sectionTableOffset = optionalHeaderOffset + sizeOfOptionalHeader;
@@ -885,5 +894,35 @@ namespace KernelMode.Driver
 			
 			return true;
 		}
+
+        public static SYSTEM_MODULE_INFORMATION GetKernelModule(string moduleName)
+        {
+            if (!TryQuerySystemModules(out IntPtr buffer, out int count, out int entrySize))
+                return new SYSTEM_MODULE_INFORMATION();
+
+            var result = new SYSTEM_MODULE_INFORMATION();
+            try
+            {
+                IntPtr current = new IntPtr(buffer.ToInt64() + 4); // Skip the ULONG module count
+                for (int i = 0; i < count; i++)
+                {
+                    var entry = (SYSTEM_MODULE_INFORMATION)Marshal.PtrToStructure(current, typeof(SYSTEM_MODULE_INFORMATION));
+                    string name = Encoding.ASCII.GetString(entry.FullPathName).TrimEnd('\0').ToLowerInvariant();
+
+                    if (name.EndsWith($"\\{moduleName.ToLowerInvariant()}"))
+                    {
+                        result = entry;
+                        break;
+                    }
+                    current = new IntPtr(current.ToInt64() + entrySize);
+                }
+            }
+            finally
+            {
+                if (buffer != IntPtr.Zero)
+                    Marshal.FreeHGlobal(buffer);
+            }
+            return result;
+        }
     }
 }

@@ -105,6 +105,7 @@
     <Compile Include="Utils\NativeMethods.cs" />
     <Compile Include="Utils\OffsetResolver.cs" />
     <Compile Include="Utils\Persistence.cs" />
+    <Compile Include="Utils\ProcessHider.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />

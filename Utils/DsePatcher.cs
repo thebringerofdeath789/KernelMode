@@ -75,7 +75,7 @@ namespace KernelMode.Utils
 
         private static ulong FindCiOptionsAddress(IProvider provider)
         {
-            var ciModule = GetKernelModule("ci.dll");
+            var ciModule = DriverLoader.GetKernelModule("ci.dll");
             if (ciModule.ImageBase == IntPtr.Zero)
             {
                 Console.WriteLine("[-] Failed to find ci.dll module information.");
@@ -119,35 +119,6 @@ namespace KernelMode.Utils
             }
 
             return 0;
-        }
-
-        private static DriverLoader.SYSTEM_MODULE_INFORMATION GetKernelModule(string moduleName)
-        {
-            if (!DriverLoader.TryQuerySystemModules(out var buffer, out var count, out var entrySize))
-                return new DriverLoader.SYSTEM_MODULE_INFORMATION();
-
-            try
-            {
-                IntPtr current = new IntPtr(buffer.ToInt64() + 4); // Skip count
-                for (int i = 0; i < count; i++)
-                {
-                    var entry = Marshal.PtrToStructure<DriverLoader.SYSTEM_MODULE_INFORMATION>(current);
-                    string name = Encoding.ASCII.GetString(entry.FullPathName).TrimEnd('\0').ToLowerInvariant();
-                    if (name.EndsWith($"\\{moduleName}") || name.EndsWith($"/{moduleName}") || name.Contains(moduleName))
-                    {
-                        Marshal.FreeHGlobal(buffer);
-                        return entry;
-                    }
-                    current = new IntPtr(current.ToInt64() + entrySize);
-                }
-            }
-            finally
-            {
-                if (buffer != IntPtr.Zero)
-                    Marshal.FreeHGlobal(buffer);
-            }
-
-            return new DriverLoader.SYSTEM_MODULE_INFORMATION();
         }
     }
 }

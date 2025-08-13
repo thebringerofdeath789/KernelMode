@@ -34,6 +34,7 @@ namespace KernelMode
 				Console.WriteLine("[7] Interactive SYSTEM Shell");
 				Console.WriteLine("[8] Load unsigned driver (.sys) via DSE Patch");
 				Console.WriteLine("[9] Test PE Parsing (dry-run)");
+				Console.WriteLine("[10] Hide Process (DKOM)");
 				Console.WriteLine("[0] Exit");
 				Console.Write("Select an option: ");
 
@@ -68,6 +69,17 @@ namespace KernelMode
 						break;
 					case "9":
 						DriverLoader.TestPEParsingDryRun();
+						break;
+					case "10":
+						Console.Write("Enter PID of process to hide: ");
+						if (int.TryParse(Console.ReadLine(), out int pidToHide))
+						{
+							ProcessHider.HideProcess(pidToHide);
+						}
+						else
+						{
+							Console.WriteLine("[-] Invalid PID.");
+						}
 						break;
 					case "0":
 						return;
