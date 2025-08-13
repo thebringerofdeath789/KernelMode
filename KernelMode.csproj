@@ -98,6 +98,7 @@
     <Compile Include="Utils\DriverInstaller.cs" />
     <Compile Include="Utils\DriverLoader.cs" />
     <Compile Include="Utils\EprocessScanner.cs" />
+    <Compile Include="Utils\KernelExportResolver.cs" />
     <Compile Include="Utils\KernelMemory.cs" />
     <Compile Include="Utils\NativeMethods.cs" />
     <Compile Include="Utils\OffsetResolver.cs" />
